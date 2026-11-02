@@ -1,50 +1,38 @@
 
 use std::collections::{HashMap, HashSet};
 
-pub fn block_break_message(pos: [i32; 3]) -> String {
-    format!(
-        "[example_mod] Breaking block at {}, {}, {}",
-        pos[0], pos[1], pos[2]
-    )
-}
-
-pub fn before_break(pos: [i32; 3]) {
-    eprintln!("{}", block_break_message(pos));
-}
+pub const EVIDENCE_COUNT: usize = 19;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum EvidenceKind {
     Kelp = 0,
-    CaveVines,
-    WeepingVines,
-    Bamboo,
-    SugarCane,
-    Cactus,
-    Cocoa,
-    SweetBerries,
-    NetherWart,
-    Crops,
-    Stems,
-    Amethyst,
-    Vines,
-    Leaves,
-    GrassAndDirt,
-    MangrovePropagules,
-    Eyeblossoms,
-    Snow,
-    Ice,
+    CaveVines = 1,
+    WeepingVines = 2,
+    Bamboo = 3,
+    SugarCane = 4,
+    Cactus = 5,
+    Cocoa = 6,
+    SweetBerries = 7,
+    NetherWart = 8,
+    Crops = 9,
+    Stems = 10,
+    Amethyst = 11,
+    Vines = 12,
+    Leaves = 13,
+    GrassAndDirt = 14,
+    MangrovePropagules = 15,
+    Eyeblossoms = 16,
+    Snow = 17,
+    Ice = 18,
 }
 
-pub const EVIDENCE_COUNT: usize = 19;
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BetterSusConfig {
     pub simulation_distance: i32,
     pub min_flag: i32,
     pub hole_filter: bool,
     pub hole_distance: i32,
-    pub enabled_evidence: [bool; EVIDENCE_COUNT],
 }
 
 impl Default for BetterSusConfig {
@@ -54,12 +42,11 @@ impl Default for BetterSusConfig {
             min_flag: 40,
             hole_filter: false,
             hole_distance: 2,
-            enabled_evidence: [true; EVIDENCE_COUNT],
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ChunkObservation {
     pub x: i32,
     pub z: i32,
@@ -94,6 +81,10 @@ impl BetterSusEngine {
         }
     }
 
+    pub fn config(&self) -> &BetterSusConfig {
+        &self.config
+    }
+
     pub fn config_mut(&mut self) -> &mut BetterSusConfig {
         &mut self.config
     }
@@ -115,8 +106,7 @@ impl BetterSusEngine {
         let record = ChunkRecord {
             clears: weight > 0 || old.is_some_and(|r| r.clears),
             radius,
-            hole: observation.has_hole
-                || old.is_some_and(|r| r.hole),
+            hole: observation.has_hole || old.is_some_and(|r| r.hole),
             weight: weight.max(old.map_or(0, |r| r.weight)),
         };
 
@@ -128,18 +118,20 @@ impl BetterSusEngine {
         }
     }
 
-    fn add_coverage(&mut self, key: (i32, i32), record: ChunkRecord) {
-        let (cx, cz) = key;
-        let radius = record.radius;
-        let reach = 2 * radius + 2;
-
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
+    fn add_coverage(
+        &mut self,
+        (cx, cz): (i32, i32),
+        record: ChunkRecord,
+    ) {
+        for dx in -record.radius..=record.radius {
+            for dz in -record.radius..=record.radius {
                 *self.clear_coverage
                     .entry((cx + dx, cz + dz))
                     .or_insert(0) += 1;
             }
         }
+
+        let reach = 2 * record.radius + 2;
 
         for dx in -reach..=reach {
             for dz in -reach..=reach {
@@ -160,11 +152,9 @@ impl BetterSusEngine {
         if let Some(record) = old {
             if record.clears {
                 let (cx, cz) = key;
-                let radius = record.radius;
-                let reach = 2 * radius + 2;
 
-                for dx in -radius..=radius {
-                    for dz in -radius..=radius {
+                for dx in -record.radius..=record.radius {
+                    for dz in -record.radius..=record.radius {
                         Self::subtract(
                             &mut self.clear_coverage,
                             (cx + dx, cz + dz),
@@ -172,6 +162,8 @@ impl BetterSusEngine {
                         );
                     }
                 }
+
+                let reach = 2 * record.radius + 2;
 
                 for dx in -reach..=reach {
                     for dz in -reach..=reach {
@@ -195,6 +187,7 @@ impl BetterSusEngine {
     ) {
         if let Some(value) = map.get_mut(&key) {
             *value -= amount;
+
             if *value <= 0 {
                 map.remove(&key);
             }
@@ -225,15 +218,13 @@ impl BetterSusEngine {
         false
     }
 
-    fn covered_sides(&self, cx: i32, cz: i32, reach: i32) -> i32 {
-        let sides = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-        ];
-
-        sides
+    fn covered_sides(
+        &self,
+        cx: i32,
+        cz: i32,
+        reach: i32,
+    ) -> i32 {
+        [(1, 0), (-1, 0), (0, 1), (0, -1)]
             .iter()
             .filter(|&&(dx, dz)| {
                 self.strip_cleared(cx, cz, dx, dz, reach)
@@ -241,21 +232,47 @@ impl BetterSusEngine {
             .count() as i32
     }
 
+    fn hole_nearby(
+        &self,
+        cx: i32,
+        cz: i32,
+        distance: i32,
+    ) -> bool {
+        for dx in -distance..=distance {
+            for dz in -distance..=distance {
+                if self.records
+                    .get(&(cx + dx, cz + dz))
+                    .is_some_and(|r| r.hole)
+                {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     pub fn flagged_chunks(&self) -> Vec<(i32, i32)> {
         let threshold = self.config.min_flag.max(1);
         let hole_distance = self.config.hole_distance.clamp(0, 8);
-        let reach = 2 * self.config.simulation_distance.clamp(2, 16) + 2;
+        let reach =
+            2 * self.config.simulation_distance.clamp(2, 16) + 2;
 
         let mut result = Vec::new();
 
         for &(cx, cz) in &self.scanned {
-            if self.clear_coverage.contains_key(&(cx, cz)) {
+            let key = (cx, cz);
+
+            if self.clear_coverage.contains_key(&key) {
                 continue;
             }
 
-            if self.support.get(&(cx, cz)).copied().unwrap_or(0)
-                < threshold
-            {
+            let score = self.support
+                .get(&key)
+                .copied()
+                .unwrap_or(0);
+
+            if score < threshold {
                 continue;
             }
 
@@ -263,31 +280,13 @@ impl BetterSusEngine {
                 continue;
             }
 
-            if self.config.hole_filter {
-                let mut nearby_hole = false;
-
-                for dx in -hole_distance..=hole_distance {
-                    for dz in -hole_distance..=hole_distance {
-                        if self.records
-                            .get(&(cx + dx, cz + dz))
-                            .is_some_and(|record| record.hole)
-                        {
-                            nearby_hole = true;
-                            break;
-                        }
-                    }
-
-                    if nearby_hole {
-                        break;
-                    }
-                }
-
-                if nearby_hole {
-                    continue;
-                }
+            if self.config.hole_filter
+                && self.hole_nearby(cx, cz, hole_distance)
+            {
+                continue;
             }
 
-            result.push((cx, cz));
+            result.push(key);
         }
 
         result.sort_unstable();
@@ -300,15 +299,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn break_message_keeps_coordinates() {
-        assert_eq!(
-            block_break_message([-3, 64, 12]),
-            "[example_mod] Breaking block at -3, 64, 12"
-        );
+    fn evidence_indices_are_correct() {
+        assert_eq!(EvidenceKind::Kelp as usize, 0);
+        assert_eq!(EvidenceKind::Amethyst as usize, 11);
+        assert_eq!(EvidenceKind::Eyeblossoms as usize, 16);
+        assert_eq!(EvidenceKind::Ice as usize, 18);
+        assert_eq!(EVIDENCE_COUNT, 19);
     }
 
     #[test]
-    fn reset_removes_all_chunk_data() {
+    fn reset_clears_all_data() {
         let mut engine =
             BetterSusEngine::new(BetterSusConfig::default());
 
@@ -322,5 +322,24 @@ mod tests {
         engine.reset();
 
         assert!(engine.flagged_chunks().is_empty());
+        assert!(engine.records.is_empty());
+        assert!(engine.clear_coverage.is_empty());
+        assert!(engine.support.is_empty());
     }
-          }
+
+    #[test]
+    fn empty_observation_adds_no_coverage() {
+        let mut engine =
+            BetterSusEngine::new(BetterSusConfig::default());
+
+        engine.observe(ChunkObservation {
+            x: 0,
+            z: 0,
+            overdue_count: 0,
+            has_hole: false,
+        });
+
+        assert!(engine.clear_coverage.is_empty());
+        assert!(engine.support.is_empty());
+    }
+}
