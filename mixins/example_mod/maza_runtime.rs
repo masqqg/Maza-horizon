@@ -458,4 +458,510 @@ impl Heat {
     pub fn update(&mut self, cx: i32, cz: i32, grown: [i32; 7], ungrown: u32) {
         self.withdraw(cx, cz);
         let r = self.radius;
-        for k in
+        for k in 0..7 {
+            if grown[k] > 0 { area(cx, cz, r, |a| *self.heat[k].entry(a).or_insert(0) += grown[k]); }
+            if ungrown & (1 << k) != 0 { area(cx, cz, r, |a| *self.vetoes[k].entry(a).or_insert(0) += 1); }
+        }
+        self.chunks.insert((cx, cz), (grown, ungrown));
+        self.scanned.insert((cx, cz));
+    }
+    fn neighbours(&self, cx: i32, cz: i32) -> i32 {
+        let mut n = 0;
+        for dx in -1..=1 { for dz in -1..=1 { if (dx != 0 || dz != 0) && self.scanned.contains(&(cx + dx, cz + dz)) { n += 1; } } }
+        n
+    }
+    /// Anubis `computeVisible`: heat without vetoes, enough scanned neighbours, over the
+    /// sensitivity and a local peak.
+    pub fn visible(&self, sensitivity: i32, loaded: impl Fn(i32, i32) -> bool) -> Vec<((i32, i32), i32)> {
+        let mut total: HashMap<(i32, i32), i32> = HashMap::new();
+        for k in 0..7 {
+            for (c, h) in &self.heat[k] { if !self.vetoes[k].contains_key(c) { *total.entry(*c).or_insert(0) += *h; } }
+        }
+        let eligible: HashMap<_, _> = total.into_iter().filter(|(c, _)| loaded(c.0, c.1) && self.neighbours(c.0, c.1) >= 3).collect();
+        let reach = self.radius;
+        let mut out = Vec::new();
+        for (c, v) in &eligible {
+            if *v < sensitivity { continue; }
+            let mut peak = true;
+            'p: for dx in -reach..=reach { for dz in -reach..=reach {
+                if (dx != 0 || dz != 0) && eligible.get(&(c.0 + dx, c.1 + dz)).is_some_and(|o| o > v) { peak = false; break 'p; }
+            } }
+            if peak { out.push((*c, *v)); }
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
+    }
+}
+
+// ---------- ChunkScanner: one shared queue, nearest first, periodic rescans ----------
+#[derive(Default)]
+pub struct ChunkScanner {
+    pub last: HashMap<(i32, i32), u64>,
+    pub rescan_after: u64,
+}
+impl ChunkScanner {
+    pub fn next(&mut self, pcx: i32, pcz: i32, radius: i32, tick: u64, loaded: impl Fn(i32, i32) -> bool) -> Option<(i32, i32)> {
+        let mut best: Option<((i32, i32), i32, bool)> = None;
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                let c = (pcx + dx, pcz + dz);
+                let fresh = !self.last.contains_key(&c);
+                let due = fresh || tick.saturating_sub(self.last[&c]) >= self.rescan_after.max(1);
+                if !due || !loaded(c.0, c.1) { continue; }
+                let d = dx * dx + dz * dz;
+                if best.is_none_or(|b| (fresh && !b.2) || (fresh == b.2 && d < b.1)) { best = Some((c, d, fresh)); }
+            }
+        }
+        let (c, _, _) = best?;
+        self.last.insert(c, tick);
+        Some(c)
+    }
+    pub fn forget_far(&mut self, pcx: i32, pcz: i32, keep: i32) -> Vec<(i32, i32)> {
+        let far: Vec<_> = self.last.keys().filter(|c| (c.0 - pcx).abs() > keep || (c.1 - pcz).abs() > keep).copied().collect();
+        for c in &far { self.last.remove(c); }
+        far
+    }
+}
+
+pub mod bsc {
+
+use std::collections::{HashMap, HashSet};
+
+pub const EVIDENCE_COUNT: usize = 19;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum EvidenceKind {
+    Kelp = 0,
+    CaveVines = 1,
+    WeepingVines = 2,
+    Bamboo = 3,
+    SugarCane = 4,
+    Cactus = 5,
+    Cocoa = 6,
+    SweetBerries = 7,
+    NetherWart = 8,
+    Crops = 9,
+    Stems = 10,
+    Amethyst = 11,
+    Vines = 12,
+    Leaves = 13,
+    GrassAndDirt = 14,
+    MangrovePropagules = 15,
+    Eyeblossoms = 16,
+    Snow = 17,
+    Ice = 18,
+}
+
+#[derive(Clone, Debug)]
+pub struct BetterSusConfig {
+    pub simulation_distance: i32,
+    pub min_flag: i32,
+    pub hole_filter: bool,
+    pub hole_distance: i32,
+}
+
+impl Default for BetterSusConfig {
+    fn default() -> Self {
+        Self {
+            simulation_distance: 4,
+            min_flag: 40,
+            hole_filter: false,
+            hole_distance: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChunkObservation {
+    pub x: i32,
+    pub z: i32,
+    pub overdue_count: i32,
+    pub has_hole: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChunkRecord {
+    clears: bool,
+    radius: i32,
+    hole: bool,
+    weight: i32,
+}
+
+pub struct BetterSusEngine {
+    config: BetterSusConfig,
+    records: HashMap<(i32, i32), ChunkRecord>,
+    scanned: HashSet<(i32, i32)>,
+    clear_coverage: HashMap<(i32, i32), i32>,
+    support: HashMap<(i32, i32), i32>,
+}
+
+impl BetterSusEngine {
+    pub fn new(config: BetterSusConfig) -> Self {
+        Self {
+            config,
+            records: HashMap::new(),
+            scanned: HashSet::new(),
+            clear_coverage: HashMap::new(),
+            support: HashMap::new(),
+        }
+    }
+
+    pub fn config(&self) -> &BetterSusConfig {
+        &self.config
+    }
+
+    pub fn config_mut(&mut self) -> &mut BetterSusConfig {
+        &mut self.config
+    }
+
+    pub fn reset(&mut self) {
+        self.records.clear();
+        self.scanned.clear();
+        self.clear_coverage.clear();
+        self.support.clear();
+    }
+
+    pub fn observe(&mut self, observation: ChunkObservation) {
+        let key = (observation.x, observation.z);
+        let old = self.remove_record(key);
+
+        let radius = self.config.simulation_distance.clamp(2, 16);
+        let weight = observation.overdue_count.max(0);
+
+        let record = ChunkRecord {
+            clears: weight > 0 || old.is_some_and(|r| r.clears),
+            radius,
+            hole: observation.has_hole || old.is_some_and(|r| r.hole),
+            weight: weight.max(old.map_or(0, |r| r.weight)),
+        };
+
+        self.scanned.insert(key);
+        self.records.insert(key, record);
+
+        if record.clears {
+            self.add_coverage(key, record);
+        }
+    }
+
+    fn add_coverage(
+        &mut self,
+        (cx, cz): (i32, i32),
+        record: ChunkRecord,
+    ) {
+        for dx in -record.radius..=record.radius {
+            for dz in -record.radius..=record.radius {
+                *self.clear_coverage
+                    .entry((cx + dx, cz + dz))
+                    .or_insert(0) += 1;
+            }
+        }
+
+        let reach = 2 * record.radius + 2;
+
+        for dx in -reach..=reach {
+            for dz in -reach..=reach {
+                *self.support
+                    .entry((cx + dx, cz + dz))
+                    .or_insert(0) += record.weight;
+            }
+        }
+    }
+
+    fn remove_record(
+        &mut self,
+        key: (i32, i32),
+    ) -> Option<ChunkRecord> {
+        let old = self.records.remove(&key);
+        self.scanned.remove(&key);
+
+        if let Some(record) = old {
+            if record.clears {
+                let (cx, cz) = key;
+
+                for dx in -record.radius..=record.radius {
+                    for dz in -record.radius..=record.radius {
+                        Self::subtract(
+                            &mut self.clear_coverage,
+                            (cx + dx, cz + dz),
+                            1,
+                        );
+                    }
+                }
+
+                let reach = 2 * record.radius + 2;
+
+                for dx in -reach..=reach {
+                    for dz in -reach..=reach {
+                        Self::subtract(
+                            &mut self.support,
+                            (cx + dx, cz + dz),
+                            record.weight,
+                        );
+                    }
+                }
+            }
+        }
+
+        old
+    }
+
+    fn subtract(
+        map: &mut HashMap<(i32, i32), i32>,
+        key: (i32, i32),
+        amount: i32,
+    ) {
+        if let Some(value) = map.get_mut(&key) {
+            *value -= amount;
+
+            if *value <= 0 {
+                map.remove(&key);
+            }
+        }
+    }
+
+    fn strip_cleared(
+        &self,
+        cx: i32,
+        cz: i32,
+        dx: i32,
+        dz: i32,
+        reach: i32,
+    ) -> bool {
+        for depth in 1..=reach {
+            for lateral in -reach..=reach {
+                let key = (
+                    cx + dx * depth + dz * lateral,
+                    cz + dz * depth + dx * lateral,
+                );
+
+                if self.clear_coverage.contains_key(&key) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn covered_sides(
+        &self,
+        cx: i32,
+        cz: i32,
+        reach: i32,
+    ) -> i32 {
+        [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .filter(|&&(dx, dz)| {
+                self.strip_cleared(cx, cz, dx, dz, reach)
+            })
+            .count() as i32
+    }
+
+    fn hole_nearby(
+        &self,
+        cx: i32,
+        cz: i32,
+        distance: i32,
+    ) -> bool {
+        for dx in -distance..=distance {
+            for dz in -distance..=distance {
+                if self.records
+                    .get(&(cx + dx, cz + dz))
+                    .is_some_and(|r| r.hole)
+                {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    pub fn flagged_chunks(&self) -> Vec<(i32, i32)> {
+        let threshold = self.config.min_flag.max(1);
+        let hole_distance = self.config.hole_distance.clamp(0, 8);
+        let reach =
+            2 * self.config.simulation_distance.clamp(2, 16) + 2;
+
+        let mut result = Vec::new();
+
+        for &(cx, cz) in &self.scanned {
+            let key = (cx, cz);
+
+            if self.clear_coverage.contains_key(&key) {
+                continue;
+            }
+
+            let score = self.support
+                .get(&key)
+                .copied()
+                .unwrap_or(0);
+
+            if score < threshold {
+                continue;
+            }
+
+            if self.covered_sides(cx, cz, reach) < 3 {
+                continue;
+            }
+
+            if self.config.hole_filter
+                && self.hole_nearby(cx, cz, hole_distance)
+            {
+                continue;
+            }
+
+            result.push(key);
+        }
+
+        result.sort_unstable();
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evidence_indices_are_correct() {
+        assert_eq!(EvidenceKind::Kelp as usize, 0);
+        assert_eq!(EvidenceKind::Amethyst as usize, 11);
+        assert_eq!(EvidenceKind::Eyeblossoms as usize, 16);
+        assert_eq!(EvidenceKind::Ice as usize, 18);
+        assert_eq!(EVIDENCE_COUNT, 19);
+    }
+
+    #[test]
+    fn reset_clears_all_data() {
+        let mut engine =
+            BetterSusEngine::new(BetterSusConfig::default());
+
+        engine.observe(ChunkObservation {
+            x: 10,
+            z: 10,
+            overdue_count: 50,
+            has_hole: false,
+        });
+
+        engine.reset();
+
+        assert!(engine.flagged_chunks().is_empty());
+        assert!(engine.records.is_empty());
+        assert!(engine.clear_coverage.is_empty());
+        assert!(engine.support.is_empty());
+    }
+
+    #[test]
+    fn empty_observation_adds_no_coverage() {
+        let mut engine =
+            BetterSusEngine::new(BetterSusConfig::default());
+
+        engine.observe(ChunkObservation {
+            x: 0,
+            z: 0,
+            overdue_count: 0,
+            has_hole: false,
+        });
+
+        assert!(engine.clear_coverage.is_empty());
+        assert!(engine.support.is_empty());
+    }
+}
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Grid(HashMap<(i32,i32,i32), Rc<Info>>, Rc<Info>);
+    impl View for Grid {
+        fn info(&self, x: i32, y: i32, z: i32) -> Rc<Info> { self.0.get(&(x, y, z)).cloned().unwrap_or_else(|| self.1.clone()) }
+        fn light(&self, _: i32, _: i32, _: i32) -> u8 { 15 }
+        fn block_light(&self, _: i32, _: i32, _: i32) -> u8 { 0 }
+    }
+    fn grid() -> Grid { Grid(HashMap::new(), Rc::new(Info::new("minecraft:air", vec![]))) }
+    #[test]
+    fn young_cane_is_owed_old_is_not() {
+        let mut g = grid();
+        g.0.insert((0, 0, 0), Rc::new(Info::new("sugar_cane", vec![])));
+        let i = g.info(0, 0, 0);
+        assert!(bs_owed(&g, 0, 0, 0, &i)); // 1 tall: should have grown
+        for y in 1..3 { g.0.insert((0, y, 0), Rc::new(Info::new("sugar_cane", vec![]))); }
+        let top = g.info(0, 2, 0);
+        assert!(!bs_owed(&g, 0, 2, 0, &top)); // 3 tall: done
+    }
+    #[test]
+    fn scan_counts_and_stores() {
+        let mut g = grid();
+        g.0.insert((1, 5, 1), Rc::new(Info::new("nether_wart", vec![("age".into(), "0".into())])));
+        g.0.insert((2, 5, 2), Rc::new(Info::new("minecraft:chest", vec![])));
+        g.0.insert((3, 5, 3), Rc::new(Info::new("cocoa", vec![("age".into(), "2".into())])));
+        let o = scan_chunk(&g, 0, 0, 0, 10, true, true, true);
+        assert_eq!(o.bs_count, 1);
+        assert_eq!(o.storage.len(), 1);
+        assert_eq!(o.grown[5], 1);
+    }
+    #[test]
+    fn heat_peak_and_veto() {
+        let mut h = Heat { radius: 2, ..Default::default() };
+        for dx in -1..=1 { for dz in -1..=1 { h.scanned.insert((10 + dx, 10 + dz)); } }
+        for dx in -3..=3 { for dz in -3..=3 { h.scanned.insert((dx, dz)); } }
+        h.update(10, 10, [9, 0, 0, 0, 0, 0, 0], 0);
+        let v = h.visible(6, |_, _| true);
+        assert_eq!(v.first().map(|x| x.1), Some(9));
+        assert!(v.len() >= 1);
+        h.update(10, 10, [9, 0, 0, 0, 0, 0, 0], 1); // veto on kind 0
+        assert!(h.visible(6, |_, _| true).is_empty());
+    }
+    #[test]
+    fn scanner_nearest_first_and_rescan() {
+        let mut s = ChunkScanner { rescan_after: 100, ..Default::default() };
+        assert_eq!(s.next(0, 0, 3, 0, |_, _| true), Some((0, 0)));
+        let second = s.next(0, 0, 3, 1, |_, _| true).unwrap();
+        assert!(second.0.abs() <= 1 && second.1.abs() <= 1);
+    }
+
+    #[test]
+    fn storage_names() {
+        assert_eq!(storage_kind("minecraft:trapped_chest"), Some(0));
+        assert_eq!(storage_kind("minecraft:red_shulker_box"), Some(2));
+        let mut m = HashMap::new();
+        remember(&mut m, (1, 2, 3), 0);
+        forget_if_changed(&mut m, (1, 2, 3), None);
+        assert!(m.is_empty());
+        assert_eq!(storage_kind("minecraft:stone"), None);
+    }
+    #[test]
+    fn center_projects_to_middle() {
+        let (x, y) = project([0.0, 0.0, 0.0], 0.0, 0.0, 70.0, 800.0, 600.0, [0.0, 0.0, 5.0]).unwrap();
+        assert!((x - 400.0).abs() < 0.1 && (y - 300.0).abs() < 0.1);
+        assert!(project([0.0; 3], 0.0, 0.0, 70.0, 800.0, 600.0, [0.0, 0.0, -5.0]).is_none());
+    }
+    #[test]
+    fn freecam_moves_forward() {
+        let p = freecam_step([0.0; 3], 0.0, 0.0, [true, false, false, false, false, false], 10.0, 1.0);
+        assert!((p[2] - 10.0).abs() < 1e-9);
+    }
+    #[test]
+    fn orbit_is_behind() {
+        let p = orbit_position([0.0; 3], 0.0, 0.0, 4.0);
+        assert!((p[2] + 4.0).abs() < 1e-9);
+    }
+    #[test]
+    fn vanish_reports_leave_and_return() {
+        let (mut k, mut g) = (HashMap::new(), HashMap::new());
+        vanish_update(&mut k, &[(1, "A".into())], 0, &mut g, 100);
+        assert_eq!(vanish_update(&mut k, &[], 10, &mut g, 100).len(), 1);
+        assert_eq!(vanish_update(&mut k, &[(1, "A".into())], 50, &mut g, 100).len(), 1);
+    }
+    #[test]
+    fn sus_threshold() {
+        let mut m = HashMap::new();
+        m.insert((0, 0), 50);
+        m.insert((1, 1), 5);
+        assert_eq!(sus_flagged(&m, 40).len(), 1);
+    }
+}
