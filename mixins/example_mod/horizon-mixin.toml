@@ -1,5 +1,5 @@
 [mod]
-id = "example_mod"
+id = "maza"
 version = "0.1.0"
 priority = 100
 
@@ -9,12 +9,50 @@ horizon_revision = "ba6344a59cb9e755b730dcf02285fc0d33b97d3c"
 [[module]]
 id = "runtime"
 file = "crates/horizon-client/src/game.rs"
-name = "example_mod"
+name = "maza"
 source = "runtime.rs"
 
 [[injection]]
-id = "before-break"
+id = "tick"
 kind = "HEAD"
-target = "horizon_client::game::Game<'_>::break_block"
-helper = "break.rs"
-bindings = [{ name = "pos", ty = "[i32;3]", value = "pos" }]
+target = "horizon_client::game::native_hooks::Game<'_>::native_tick"
+helper = "tick.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+[[injection]]
+id = "key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_key"
+helper = "key.rs"
+bindings = [
+  { name = "key", ty = "&str", value = "key" },
+  { name = "pressed", ty = "bool", value = "pressed" },
+]
+
+[[injection]]
+id = "command"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_command"
+helper = "command.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "&mut *ran" },
+]
+
+[[injection]]
+id = "hud"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_hud"
+helper = "hud.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
+]
+
+[[injection]]
+id = "camera"
+kind = "RETURN"
+target = "horizon_client::game::Game<'_>::camera_view"
+helper = "camera.rs"
+bindings = [{ name = "view", ty = "Option<(glam::DVec3, f32, f32)>", value = "$value" }]
