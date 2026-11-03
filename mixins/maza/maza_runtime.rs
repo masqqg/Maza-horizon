@@ -157,7 +157,7 @@ pub fn sus_flagged(scores: &HashMap<(i32, i32), i32>, min_flag: i32) -> Vec<((i3
         .filter(|(_, s)| **s >= min_flag)
         .map(|(k, s)| (*k, *s))
         .collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|b| std::cmp::Reverse(b.1));
     v
 }
 /// ANBS+ glow: a chunk with amethyst whose cluster block light is higher than
@@ -185,14 +185,13 @@ pub fn vanish_update(
     let mut out = Vec::new();
     let present: HashSet<u128> = now.iter().map(|p| p.0).collect();
     for (u, name) in now {
-        if known.insert(*u, name.clone()).is_none() {
-            if let Some(t) = gone_at.remove(u) {
-                if tick.saturating_sub(t) <= window {
-                    out.push(format!(
-                        "{name}: tab'a geri döndü (vanish kapatmış olabilir)"
-                    ));
-                }
-            }
+        if known.insert(*u, name.clone()).is_none()
+            && let Some(t) = gone_at.remove(u)
+            && tick.saturating_sub(t) <= window
+        {
+            out.push(format!(
+                "{name}: tab'a geri döndü (vanish kapatmış olabilir)"
+            ));
         }
     }
     let gone: Vec<u128> = known
@@ -430,13 +429,8 @@ pub fn bs_classify(i: &Info) -> i8 {
         "pumpkin_stem" | "melon_stem" => 10,
         "vine" => 12,
         "budding_amethyst" | "amethyst_cluster" => 11,
-        "mangrove_propagule" => {
-            if i.flag("hanging") {
-                15
-            } else {
-                -1
-            }
-        }
+        "mangrove_propagule" if i.flag("hanging") => 15,
+        "mangrove_propagule" => -1,
         "wheat" | "carrots" | "potatoes" | "beetroots" | "torchflower_crop" => 9,
         n if n.ends_with("_leaves") => 13,
         _ if i.is_bud() => 11,
@@ -652,6 +646,7 @@ pub struct ScanOut {
     pub storage: Vec<((i32, i32, i32), usize)>,
 }
 /// One pass over a chunk for all modules.
+#[allow(clippy::too_many_arguments)]
 pub fn scan_chunk<V: View + ?Sized>(
     v: &V,
     cx: i32,
@@ -724,9 +719,9 @@ impl Heat {
     pub fn withdraw(&mut self, cx: i32, cz: i32) {
         if let Some((g, u)) = self.chunks.remove(&(cx, cz)) {
             let r = self.radius;
-            for k in 0..7 {
-                if g[k] > 0 {
-                    area(cx, cz, r, |a| sub(&mut self.heat[k], a, g[k]));
+            for (k, &gk) in g.iter().enumerate() {
+                if gk > 0 {
+                    area(cx, cz, r, |a| sub(&mut self.heat[k], a, gk));
                 }
                 if u & (1 << k) != 0 {
                     area(cx, cz, r, |a| sub(&mut self.vetoes[k], a, 1));
@@ -737,11 +732,9 @@ impl Heat {
     pub fn update(&mut self, cx: i32, cz: i32, grown: [i32; 7], ungrown: u32) {
         self.withdraw(cx, cz);
         let r = self.radius;
-        for k in 0..7 {
-            if grown[k] > 0 {
-                area(cx, cz, r, |a| {
-                    *self.heat[k].entry(a).or_insert(0) += grown[k]
-                });
+        for (k, &gk) in grown.iter().enumerate() {
+            if gk > 0 {
+                area(cx, cz, r, |a| *self.heat[k].entry(a).or_insert(0) += gk);
             }
             if ungrown & (1 << k) != 0 {
                 area(cx, cz, r, |a| *self.vetoes[k].entry(a).or_insert(0) += 1);
@@ -995,22 +988,22 @@ pub mod bsc {
             let old = self.records.remove(&key);
             self.scanned.remove(&key);
 
-            if let Some(record) = old {
-                if record.clears {
-                    let (cx, cz) = key;
+            if let Some(record) = old
+                && record.clears
+            {
+                let (cx, cz) = key;
 
-                    for dx in -record.radius..=record.radius {
-                        for dz in -record.radius..=record.radius {
-                            Self::subtract(&mut self.clear_coverage, (cx + dx, cz + dz), 1);
-                        }
+                for dx in -record.radius..=record.radius {
+                    for dz in -record.radius..=record.radius {
+                        Self::subtract(&mut self.clear_coverage, (cx + dx, cz + dz), 1);
                     }
+                }
 
-                    let reach = 2 * record.radius + 2;
+                let reach = 2 * record.radius + 2;
 
-                    for dx in -reach..=reach {
-                        for dz in -reach..=reach {
-                            Self::subtract(&mut self.support, (cx + dx, cz + dz), record.weight);
-                        }
+                for dx in -reach..=reach {
+                    for dz in -reach..=reach {
+                        Self::subtract(&mut self.support, (cx + dx, cz + dz), record.weight);
                     }
                 }
             }
@@ -1223,7 +1216,7 @@ mod tests {
         h.update(10, 10, [9, 0, 0, 0, 0, 0, 0], 0);
         let v = h.visible(6, |_, _| true);
         assert_eq!(v.first().map(|x| x.1), Some(9));
-        assert!(v.len() >= 1);
+        assert!(!v.is_empty());
         h.update(10, 10, [9, 0, 0, 0, 0, 0, 0], 1); // veto on kind 0
         assert!(h.visible(6, |_, _| true).is_empty());
     }
