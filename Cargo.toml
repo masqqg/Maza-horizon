@@ -1,5 +1,5 @@
 [package]
-name = "horizon-example-mod"
+name = "maza-horizon-mod"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
@@ -8,7 +8,7 @@ description = "A minimal native Horizon Mixins mod"
 
 [lib]
 # This exact source is also injected as a same-crate module by horizon-mixins.
-path = "mixins/example_mod/runtime.rs"
+path = "mixins/maza/maza_runtime.rs"
 
 [workspace]
 members = ["tools/audit"]
